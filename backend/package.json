@@ -8,7 +8,10 @@
     "dev": "node --watch app.js"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.117.2",
     "cors": "latest",
-    "express": "latest"
+    "dotenv": "^18.0.5",
+    "express": "latest",
+    "swagger-ui-express": "^5.0.1"
   }
 }
