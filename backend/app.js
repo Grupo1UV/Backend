@@ -419,6 +419,124 @@ app.get(['/api/users/profile', '/api/users/profile/'], (req, res) => {
       streak_current: 0,
       streak_last_day: null,
       streak_best: 0,
+      limit_hours_day: userCapacities[getUserIdFromReq(req) || 'default'] || 6,
+    },
+  });
+});
+
+// Memoria de capacidad diaria por usuario (Sprint 3: Módulo 2)
+const userCapacities = {};
+
+// GET /api/users/capacity (Módulo 2: Consultar capacidad diaria)
+app.get(['/api/users/capacity', '/api/users/capacity/'], (req, res) => {
+  const userId = getUserIdFromReq(req) || 'default';
+  const limitHoursDay = userCapacities[userId] || 6;
+  res.status(200).json({
+    ok: true,
+    status: 'success',
+    data: {
+      limitHoursDay,
+      limiteDiario: limitHoursDay,
+    },
+  });
+});
+
+// PUT / PATCH /api/users/capacity (Módulo 2: Modificar capacidad diaria 1-16 horas)
+app.all(['/api/users/capacity', '/api/users/capacity/', '/api/users/limit-hours', '/api/users/limit-hours/'], (req, res, next) => {
+  if (req.method !== 'PUT' && req.method !== 'PATCH' && req.method !== 'POST') return next();
+  const userId = getUserIdFromReq(req) || 'default';
+  const raw = req.body?.limitHoursDay ?? req.body?.limiteDiario ?? req.body?.limit_hours_day;
+  const val = Number(raw);
+
+  if (!Number.isFinite(val) || val < 1 || val > 16) {
+    return res.status(400).json({
+      ok: false,
+      status: 'error',
+      error: 'El valor debe estar entre 1 y 16 horas',
+      message: 'El valor debe estar entre 1 y 16 horas',
+    });
+  }
+
+  const sanitized = Math.round(val * 10) / 10;
+  userCapacities[userId] = sanitized;
+
+  res.status(200).json({
+    ok: true,
+    status: 'success',
+    message: 'Se cambió exitosamente el límite diario',
+    data: {
+      limitHoursDay: sanitized,
+      limiteDiario: sanitized,
+    },
+  });
+});
+
+// PATCH / PUT /api/subtasks/:id (Sprint 3: Módulo 3 y 4 - Actualización y reprogramación)
+app.all(['/api/subtasks/:id', '/api/subtasks/:id/'], (req, res, next) => {
+  if (req.method !== 'PATCH' && req.method !== 'PUT') return next();
+
+  const subId = req.params.id;
+  const { fechaLimite, target_date, horasEstimadas, estimated_hours, estado, status } = req.body || {};
+
+  let targetSubtask = null;
+  let targetEvent = null;
+
+  for (const evt of eventos) {
+    const found = (evt.subtareas || []).find((s) => String(s.id) === String(subId));
+    if (found) {
+      targetSubtask = found;
+      targetEvent = evt;
+      break;
+    }
+  }
+
+  if (!targetSubtask) {
+    return res.status(404).json({
+      ok: false,
+      status: 'error',
+      error: 'Subtarea no encontrada',
+      message: 'Ha ocurrido un error al intentar actualizar la subtarea. Inténtelo de nuevo.',
+    });
+  }
+
+  const nuevaFecha = fechaLimite || target_date;
+  const nuevasHoras = horasEstimadas !== undefined ? horasEstimadas : estimated_hours;
+
+  let fechaCambiada = false;
+  let horasCambiadas = false;
+
+  if (nuevaFecha !== undefined && nuevaFecha !== targetSubtask.fechaLimite) {
+    targetSubtask.fechaLimite = nuevaFecha;
+    targetSubtask.estado = 'POSTERGADA'; // Transición automática obligatoria SPRINT 3
+    fechaCambiada = true;
+  }
+
+  if (nuevasHoras !== undefined) {
+    targetSubtask.horasEstimadas = Number(nuevasHoras);
+    horasCambiadas = true;
+  }
+
+  if (estado) {
+    targetSubtask.estado = estado;
+  } else if (status === 'postponed' || status === 'POSTERGADA') {
+    targetSubtask.estado = 'POSTERGADA';
+  }
+
+  // Notificación explícita según tipo de cambio (Módulo 4)
+  let successMessage = 'La fecha de la subtarea se actualizó correctamente.';
+  if (fechaCambiada && horasCambiadas) {
+    successMessage = 'La fecha y las horas de la subtarea se actualizaron correctamente.';
+  } else if (horasCambiadas) {
+    successMessage = 'Las horas de la subtarea se actualizaron correctamente.';
+  }
+
+  res.status(200).json({
+    ok: true,
+    status: 'success',
+    message: successMessage,
+    data: {
+      ...targetSubtask,
+      eventoId: targetEvent?.id,
     },
   });
 });
