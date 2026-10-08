@@ -162,22 +162,84 @@ let eventos = [
   },
 ];
 
+// Validaciones de Jornada y Horas (US-47 / Requerimiento 4)
+const HORAS_MIN_GESTION = 0.5;
+const HORAS_MAX_GESTION = 12;
+const LIMITE_JORNADA_DEFAULT = 8;
+
+function validarSubtareasPayload(subtareas, limiteJornada = LIMITE_JORNADA_DEFAULT) {
+  if (!subtareas || !Array.isArray(subtareas)) return null;
+
+  for (const sub of subtareas) {
+    const horas = Number(sub.horasEstimadas ?? sub.horas_estimadas);
+    if (isNaN(horas) || horas < HORAS_MIN_GESTION || horas > HORAS_MAX_GESTION) {
+      return `Las horas estimadas de la gestión "${sub.titulo || 'Sin título'}" deben estar entre ${HORAS_MIN_GESTION} y ${HORAS_MAX_GESTION} horas.`;
+    }
+  }
+
+  // Agrupar y validar carga horaria por jornada
+  const horasPorFecha = {};
+  for (const sub of subtareas) {
+    const fecha = sub.fechaLimite || sub.fecha_limite || 'General';
+    const horas = Number(sub.horasEstimadas ?? sub.horas_estimadas) || 0;
+    horasPorFecha[fecha] = (horasPorFecha[fecha] || 0) + horas;
+  }
+
+  for (const [fecha, total] of Object.entries(horasPorFecha)) {
+    if (total > limiteJornada) {
+      return `La jornada "${fecha}" acumula ${total}h, excediendo el límite diario de ${limiteJornada}h. Rebalancee la carga horaria.`;
+    }
+  }
+
+  return null;
+}
+
+// Extractor de usuario para aislamiento de datos (Requerimiento 5)
+function getUserIdFromReq(req) {
+  if (req.headers['x-user-id']) return req.headers['x-user-id'];
+  const auth = req.headers['authorization'];
+  if (auth && auth.startsWith('Bearer ')) {
+    const token = auth.slice(7);
+    try {
+      const parts = token.split('.');
+      if (parts.length === 3) {
+        const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString());
+        if (payload.sub) return payload.sub;
+        if (payload.user_id) return payload.user_id;
+        if (payload.uuid) return payload.uuid;
+      }
+    } catch {
+      // Ignorar si el token es opaco
+    }
+  }
+  return null;
+}
+
 // Health Check
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, servicio: 'organizador-eventos-api', timestamp: new Date().toISOString() });
 });
 
-// GET /api/eventos (lee de Supabase con fallback a memoria)
-app.get('/api/eventos', async (_req, res) => {
+// GET /api/eventos (lee de Supabase con fallback a memoria, filtrado por usuario)
+app.get('/api/eventos', async (req, res) => {
+  const userId = getUserIdFromReq(req);
   try {
-    const { data: dbEvents, error } = await supabase.from('events').select('*');
+    let query = supabase.from('events').select('*');
+    if (userId) {
+      query = query.or(`user_id.eq.${userId},user_id.is.null`);
+    }
+    const { data: dbEvents, error } = await query;
     const { data: dbSubtasks } = await supabase.from('subtasks').select('*');
     if (!error && dbEvents && dbEvents.length > 0) {
       const merged = dbEvents.map((evt) => ({
         id: evt.id,
+        userId: evt.user_id,
+        user_id: evt.user_id,
         nombre: evt.nombre,
         tipo: evt.tipo,
         fecha: evt.fecha,
+        lugar: evt.lugar || '',
+        asistentes: evt.asistentes || 0,
         descripcion: evt.descripcion || '',
         hasCriticalError: evt.has_critical_error,
         subtareas: (dbSubtasks || [])
@@ -198,7 +260,11 @@ app.get('/api/eventos', async (_req, res) => {
   } catch (e) {
     console.warn('Fallback a eventos locales:', e);
   }
-  res.json({ ok: true, data: eventos, total: eventos.length, source: 'local' });
+
+  const localesFiltrados = userId
+    ? eventos.filter((e) => !e.userId || e.userId === userId)
+    : eventos;
+  res.json({ ok: true, data: localesFiltrados, total: localesFiltrados.length, source: 'local' });
 });
 
 // GET /api/eventos/:id
@@ -212,17 +278,28 @@ app.get('/api/eventos/:id', (req, res) => {
 
 // POST /api/eventos (T1)
 app.post('/api/eventos', async (req, res) => {
-  const { nombre, tipo, fecha, descripcion, subtareas } = req.body;
-  if (!nombre) {
-    return res.status(400).json({ ok: false, error: 'El nombre es obligatorio' });
+  const userId = getUserIdFromReq(req) || req.body.userId || req.body.user_id || '00260f2c-7cfb-411d-be11-61e1e2099d3e';
+  const { nombre, tipo, fecha, descripcion, lugar, asistentes, subtareas, limiteHorasPorJornada } = req.body;
+
+  if (!nombre || !nombre.trim()) {
+    return res.status(400).json({ ok: false, error: 'El nombre del evento es obligatorio.' });
+  }
+
+  const errSub = validarSubtareasPayload(subtareas, limiteHorasPorJornada);
+  if (errSub) {
+    return res.status(400).json({ ok: false, error: errSub });
   }
 
   const id = `evt-${Date.now()}`;
   const nuevoEvento = {
     id,
-    nombre,
+    userId,
+    user_id: userId,
+    nombre: nombre.trim(),
     tipo: tipo || 'General',
     fecha: fecha || new Date().toISOString().split('T')[0],
+    lugar: lugar || '',
+    asistentes: Number(asistentes) || 0,
     descripcion: descripcion || '',
     hasCriticalError: false,
     subtareas: subtareas || [],
@@ -233,9 +310,12 @@ app.post('/api/eventos', async (req, res) => {
   try {
     await supabase.from('events').insert({
       id: nuevoEvento.id,
+      user_id: nuevoEvento.user_id,
       nombre: nuevoEvento.nombre,
       tipo: nuevoEvento.tipo,
       fecha: nuevoEvento.fecha,
+      lugar: nuevoEvento.lugar,
+      asistentes: nuevoEvento.asistentes,
       descripcion: nuevoEvento.descripcion,
       has_critical_error: nuevoEvento.hasCriticalError,
     });
@@ -251,6 +331,14 @@ app.put('/api/eventos/:id', (req, res) => {
   const index = eventos.findIndex((e) => e.id === req.params.id);
   if (index === -1) {
     return res.status(404).json({ ok: false, error: 'Evento no encontrado' });
+  }
+
+  const { subtareas, limiteHorasPorJornada } = req.body;
+  if (subtareas) {
+    const errSub = validarSubtareasPayload(subtareas, limiteHorasPorJornada);
+    if (errSub) {
+      return res.status(400).json({ ok: false, error: errSub });
+    }
   }
 
   eventos[index] = { ...eventos[index], ...req.body };
@@ -370,11 +458,16 @@ app.get(['/api/subtasks/today', '/api/subtasks/today/'], (req, res) => {
   const { course, event, days, status } = req.query;
   const todayIso = getTodayIso();
 
-  // Aplanar todas las subtareas con formato DRF
+  // Aplanar todas las subtareas con formato DRF aisladas por usuario
   let flatSubtasks = [];
   let subtaskCounter = 20;
 
-  eventos.forEach((evt, evtIndex) => {
+  const userId = getUserIdFromReq(req);
+  const eventosActivos = userId
+    ? eventos.filter((e) => !e.userId || e.userId === userId)
+    : eventos;
+
+  eventosActivos.forEach((evt, evtIndex) => {
     const evtNumId = 80 + evtIndex;
     (evt.subtareas || []).forEach((sub) => {
       subtaskCounter += 1;
