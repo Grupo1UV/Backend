@@ -476,7 +476,7 @@ app.get(['/api/subtasks/today', '/api/subtasks/today/'], (req, res) => {
       // Mapeo de estado estándar DRF
       let mappedStatus = 'pending';
       if (sub.estado === 'Hecha') mappedStatus = 'done';
-      else if (sub.estado === 'Pospuesta' || sub.fechaLimite === 'Próxima semana') mappedStatus = 'postponed';
+      else if (sub.estado === 'Pospuesta' || sub.estado === 'POSTERGADA' || sub.estado === 'postergada' || sub.fechaLimite === 'Próxima semana') mappedStatus = 'postponed';
       else if (targetDate < todayIso) mappedStatus = 'overdue';
 
       flatSubtasks.push({
