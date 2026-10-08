@@ -452,8 +452,8 @@ app.all(['/api/users/capacity', '/api/users/capacity/', '/api/users/limit-hours'
     return res.status(400).json({
       ok: false,
       status: 'error',
-      error: 'El valor debe estar entre 1 y 16 horas',
-      message: 'El valor debe estar entre 1 y 16 horas',
+      error: 'El valor debe estar entre 1 y 16',
+      message: 'El valor debe estar entre 1 y 16',
     });
   }
 
@@ -471,7 +471,36 @@ app.all(['/api/users/capacity', '/api/users/capacity/', '/api/users/limit-hours'
   });
 });
 
-// PATCH / PUT /api/subtasks/:id (Sprint 3: Módulo 3 y 4 - Actualización y reprogramación)
+// Helper de fechas para subtasks y cálculo de sobrecarga
+const getTodayIso = () => new Date().toISOString().split('T')[0];
+
+const normalizeSubtaskDate = (fechaStr, todayIso = getTodayIso()) => {
+  if (!fechaStr) return '2026-12-31';
+  if (fechaStr === 'Hoy') return todayIso;
+  if (fechaStr === 'Mañana') {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    return d.toISOString().split('T')[0];
+  }
+  if (fechaStr === 'Próxima semana') {
+    const d = new Date();
+    d.setDate(d.getDate() + 7);
+    return d.toISOString().split('T')[0];
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(fechaStr)) {
+    return fechaStr;
+  }
+  const ddmmyyyy = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(fechaStr);
+  if (ddmmyyyy) {
+    const d = ddmmyyyy[1].padStart(2, '0');
+    const m = ddmmyyyy[2].padStart(2, '0');
+    const y = ddmmyyyy[3];
+    return `${y}-${m}-${d}`;
+  }
+  return '2026-12-31';
+};
+
+// PATCH / PUT /api/subtasks/:id (Sprint 3: Módulo 3 y 4 - Actualización y reprogramación con detección de sobrecarga)
 app.all(['/api/subtasks/:id', '/api/subtasks/:id/'], (req, res, next) => {
   if (req.method !== 'PATCH' && req.method !== 'PUT') return next();
 
@@ -499,8 +528,51 @@ app.all(['/api/subtasks/:id', '/api/subtasks/:id/'], (req, res, next) => {
     });
   }
 
+  const userId = getUserIdFromReq(req) || 'default';
+  const limitHoursDay = userCapacities[userId] || 6;
+
   const nuevaFecha = fechaLimite || target_date;
   const nuevasHoras = horasEstimadas !== undefined ? horasEstimadas : estimated_hours;
+
+  const fechaDestino = nuevaFecha !== undefined ? nuevaFecha : targetSubtask.fechaLimite;
+  const horasDestino = nuevasHoras !== undefined ? Number(nuevasHoras) : (Number(targetSubtask.horasEstimadas) || 0);
+
+  const todayIso = getTodayIso();
+  const fechaDestinoNorm = normalizeSubtaskDate(fechaDestino, todayIso);
+
+  // Sumar horas ya asignadas en esa fecha excluyendo la subtarea que se actualiza
+  let horasAsignadasEnFecha = 0;
+  for (const evt of eventos) {
+    for (const sub of (evt.subtareas || [])) {
+      if (String(sub.id) !== String(targetSubtask.id) && sub.estado !== 'Hecha') {
+        if (normalizeSubtaskDate(sub.fechaLimite, todayIso) === fechaDestinoNorm) {
+          horasAsignadasEnFecha += Number(sub.horasEstimadas) || 0;
+        }
+      }
+    }
+  }
+
+  const horasTotalesCalculadas = Math.round((horasAsignadasEnFecha + horasDestino) * 10) / 10;
+
+  // SPRINT 3: Si la suma supera el límite diario configurado, rechazar con 409 Conflict y overload_conflict
+  if (horasTotalesCalculadas > limitHoursDay) {
+    return res.status(409).json({
+      ok: false,
+      status: 'error',
+      error: 'overload_conflict',
+      code: 'overload_conflict',
+      message: `Quedarías con ${horasTotalesCalculadas}h planificadas (límite ${limitHoursDay}h)`,
+      data: {
+        error: 'overload_conflict',
+        horas_totales_calculadas: horasTotalesCalculadas,
+        horasTotales: horasTotalesCalculadas,
+        limite_actual_usuario: limitHoursDay,
+        limiteDiario: limitHoursDay,
+        fecha: fechaDestino,
+        subtareaAfectada: targetSubtask,
+      },
+    });
+  }
 
   let fechaCambiada = false;
   let horasCambiadas = false;
@@ -540,28 +612,6 @@ app.all(['/api/subtasks/:id', '/api/subtasks/:id/'], (req, res, next) => {
     },
   });
 });
-
-// Helper de fechas para subtasks/today
-const getTodayIso = () => new Date().toISOString().split('T')[0];
-
-const normalizeSubtaskDate = (fechaStr, todayIso) => {
-  if (!fechaStr) return '2026-12-31';
-  if (fechaStr === 'Hoy') return todayIso;
-  if (fechaStr === 'Mañana') {
-    const d = new Date();
-    d.setDate(d.getDate() + 1);
-    return d.toISOString().split('T')[0];
-  }
-  if (fechaStr === 'Próxima semana') {
-    const d = new Date();
-    d.setDate(d.getDate() + 7);
-    return d.toISOString().split('T')[0];
-  }
-  if (/^\d{4}-\d{2}-\d{2}$/.test(fechaStr)) {
-    return fechaStr;
-  }
-  return '2026-12-31';
-};
 
 // GET /api/subtasks/today/ (US-05 / US-11)
 app.get(['/api/subtasks/today', '/api/subtasks/today/'], (req, res) => {
