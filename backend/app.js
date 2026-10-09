@@ -4,7 +4,7 @@ import { createClient } from '@supabase/supabase-js';
 import swaggerUi from 'swagger-ui-express';
 
 const app = express();
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 8000;
 
 app.use(cors());
 app.use(express.json());
@@ -19,6 +19,8 @@ const swaggerDocument = {
   },
   servers: [
     { url: `http://localhost:${port}`, description: 'Servidor Local de Desarrollo' },
+    { url: 'http://localhost:8000', description: 'Servidor Local (Puerto 8000)' },
+    { url: 'http://localhost:3000', description: 'Servidor Local (Puerto 3000)' },
     { url: 'https://grupo1uv.onrender.com', description: 'Servidor de Producción (Render)' },
   ],
   components: {
@@ -446,15 +448,20 @@ app.all(['/api/users/capacity', '/api/users/capacity/', '/api/users/limit-hours'
   if (req.method !== 'PUT' && req.method !== 'PATCH' && req.method !== 'POST') return next();
   const userId = getUserIdFromReq(req) || 'default';
   const raw = req.body?.limitHoursDay ?? req.body?.limiteDiario ?? req.body?.limit_hours_day;
-  const val = Number(raw);
+  let val = 6;
 
-  if (!Number.isFinite(val) || val < 1 || val > 16) {
-    return res.status(400).json({
-      ok: false,
-      status: 'error',
-      error: 'El valor debe estar entre 1 y 16',
-      message: 'El valor debe estar entre 1 y 16',
-    });
+  if (raw === '' || raw === null || raw === undefined) {
+    val = 6;
+  } else {
+    val = Number(raw);
+    if (!Number.isFinite(val) || val < 1 || val > 16) {
+      return res.status(400).json({
+        ok: false,
+        status: 'error',
+        error: 'El valor debe estar entre 1 y 16',
+        message: 'El valor debe estar entre 1 y 16',
+      });
+    }
   }
 
   const sanitized = Math.round(val * 10) / 10;
@@ -463,7 +470,7 @@ app.all(['/api/users/capacity', '/api/users/capacity/', '/api/users/limit-hours'
   res.status(200).json({
     ok: true,
     status: 'success',
-    message: 'Se cambió exitosamente el límite diario',
+    message: 'Límite actualizado',
     data: {
       limitHoursDay: sanitized,
       limiteDiario: sanitized,
@@ -476,13 +483,14 @@ const getTodayIso = () => new Date().toISOString().split('T')[0];
 
 const normalizeSubtaskDate = (fechaStr, todayIso = getTodayIso()) => {
   if (!fechaStr) return '2026-12-31';
-  if (fechaStr === 'Hoy') return todayIso;
-  if (fechaStr === 'Mañana') {
+  const str = String(fechaStr).trim().toLowerCase();
+  if (str === 'hoy') return todayIso;
+  if (str === 'mañana' || str === 'manana') {
     const d = new Date();
     d.setDate(d.getDate() + 1);
     return d.toISOString().split('T')[0];
   }
-  if (fechaStr === 'Próxima semana') {
+  if (str.includes('semana')) {
     const d = new Date();
     d.setDate(d.getDate() + 7);
     return d.toISOString().split('T')[0];
@@ -540,9 +548,10 @@ app.all(['/api/subtasks/:id', '/api/subtasks/:id/'], (req, res, next) => {
   const todayIso = getTodayIso();
   const fechaDestinoNorm = normalizeSubtaskDate(fechaDestino, todayIso);
 
-  // Sumar horas ya asignadas en esa fecha excluyendo la subtarea que se actualiza
+  // Sumar horas ya asignadas en esa fecha excluyendo la subtarea que se actualiza y aisladas por usuario
   let horasAsignadasEnFecha = 0;
   for (const evt of eventos) {
+    if (userId && evt.userId && evt.userId !== userId) continue;
     for (const sub of (evt.subtareas || [])) {
       if (String(sub.id) !== String(targetSubtask.id) && sub.estado !== 'Hecha') {
         if (normalizeSubtaskDate(sub.fechaLimite, todayIso) === fechaDestinoNorm) {
