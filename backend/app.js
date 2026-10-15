@@ -1,735 +1,103 @@
 import express from 'express';
 import cors from 'cors';
-import { createClient } from '@supabase/supabase-js';
+import dotenv from 'dotenv';
 import swaggerUi from 'swagger-ui-express';
+import { createSupabaseRepo } from './models/supabaseRepo.js';
+import { createTokenService, requireAuth } from './middleware/auth.js';
+import { createAuthController } from './controllers/authController.js';
+import { createEventsController } from './controllers/eventsController.js';
+import { createSubtasksController } from './controllers/subtasksController.js';
+import { errorMiddleware } from './controllers/helpers.js';
+import { swaggerDocument } from './swaggerDoc.js';
 
-const app = express();
+dotenv.config();
+
+const DEFAULT_AUTH_SECRET =
+  process.env.AUTH_SECRET || 'eventify_production_secure_token_secret_32_characters_minimum';
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://gihlakkmlshgoibwnoay.supabase.co';
+const SUPABASE_ANON_KEY =
+  process.env.SUPABASE_ANON_KEY ||
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdpaGxha2ttbHNoZ29pYndub2F5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA4ODMzMzYsImV4cCI6MjEwNjQ1OTMzNn0.O6LubxLInJ578EKSGfPV-GNW9lHAGVSO70yJBOVVJBw';
+
+/**
+ * Fábrica de la aplicación Express. Permite inyectar un repositorio mock (memoryRepo)
+ * para pruebas automatizadas sin depender de red externa.
+ */
+export function createApp(customRepo = null, customSecret = DEFAULT_AUTH_SECRET) {
+  const app = express();
+
+  app.use(cors());
+  app.use(express.json());
+
+  const tokenService = createTokenService(customSecret);
+  const repo = customRepo || createSupabaseRepo({ url: SUPABASE_URL, key: SUPABASE_ANON_KEY });
+
+  const authCtrl = createAuthController(repo, tokenService);
+  const eventsCtrl = createEventsController(repo);
+  const subtasksCtrl = createSubtasksController(repo);
+
+  // Documentación OpenAPI 3.0 / Swagger UI
+  app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
+
+  // Health check
+  app.get(['/api/health', '/health'], (_req, res) => {
+    res.json({ ok: true, servicio: 'organizador-eventos-api', timestamp: new Date().toISOString() });
+  });
+
+  // Rutas públicas de autenticación
+  app.post(['/api/users/register', '/api/users/register/'], authCtrl.register);
+  app.post(['/api/users/login', '/api/users/login/'], authCtrl.login);
+
+  // Middleware guardián para rutas protegidas
+  const authGuard = requireAuth(tokenService);
+
+  // Perfil y capacidad diaria (Criterio Sobrecarga / US-21)
+  app.get(['/api/users/profile', '/api/users/profile/'], authGuard, authCtrl.getProfile);
+  app.get(['/api/users/capacity', '/api/users/capacity/', '/api/users/limit-hours', '/api/users/limit-hours/'], authGuard, authCtrl.getCapacity);
+  app.all(['/api/users/capacity', '/api/users/capacity/', '/api/users/limit-hours', '/api/users/limit-hours/'], (req, res, next) => {
+    if (['PUT', 'PATCH', 'POST'].includes(req.method)) return authGuard(req, res, () => authCtrl.updateCapacity(req, res, next));
+    next();
+  });
+
+  // Eventos (US-01 a US-05, C2 / C5)
+  app.get(['/api/eventos', '/api/events'], authGuard, eventsCtrl.listEvents);
+  app.post(['/api/eventos', '/api/events'], authGuard, eventsCtrl.createEvent);
+  app.get(['/api/eventos/:id', '/api/events/:id'], authGuard, eventsCtrl.getEvent);
+  app.put(['/api/eventos/:id', '/api/events/:id'], authGuard, eventsCtrl.updateEvent);
+  app.patch(['/api/eventos/:id', '/api/events/:id'], authGuard, eventsCtrl.updateEvent);
+  app.delete(['/api/eventos/:id', '/api/events/:id'], authGuard, eventsCtrl.deleteEvent);
+  app.get(['/api/eventos/:id/progreso', '/api/events/:id/progress'], authGuard, eventsCtrl.getEventProgress);
+
+  // Subtareas y vista "Hoy" (US-12 a US-15, C3)
+  app.get(['/api/subtasks/today', '/api/subtasks/today/', '/api/tareas/hoy'], authGuard, subtasksCtrl.getToday);
+
+  // Cambio de estado con nota opcional (US-16 a US-18, C1 / C5)
+  app.patch(['/api/subtareas/:id/estado', '/api/subtareas/:id/estado/', '/api/subtasks/:id/estado', '/api/subtasks/:id/status'], authGuard, subtasksCtrl.changeStatus);
+
+  // Reprogramación y actualización de subtareas con detección de sobrecarga (Criterio Sobrecarga)
+  app.all(['/api/subtasks/:id', '/api/subtasks/:id/'], (req, res, next) => {
+    if (['PATCH', 'PUT'].includes(req.method)) return authGuard(req, res, () => subtasksCtrl.updateSubtask(req, res, next));
+    if (req.method === 'DELETE') return authGuard(req, res, () => subtasksCtrl.deleteSubtask(req, res, next));
+    next();
+  });
+
+  // Creación de subtareas para un evento (US-07 / C1)
+  app.post(['/api/events/:id/tasks', '/api/eventos/:id/subtareas'], authGuard, subtasksCtrl.createSubtask);
+
+  // Middleware de manejo de errores controlado (sin fugas de stack trace)
+  app.use(errorMiddleware);
+
+  return app;
+}
+
+const app = createApp();
 const port = process.env.PORT || 8000;
 
-app.use(cors());
-app.use(express.json());
-
-// Especificación Swagger / OpenAPI 3.0 (Sprint 2)
-const swaggerDocument = {
-  openapi: '3.0.3',
-  info: {
-    title: 'Eventify API (Sprint 2)',
-    description: 'Documentación técnica y contrato REST interactivo del Miniproyecto 1 - Grupo 1 (Universidad del Valle, 2026)',
-    version: '2.0.0',
-  },
-  servers: [
-    { url: `http://localhost:${port}`, description: 'Servidor Local de Desarrollo' },
-    { url: 'http://localhost:8000', description: 'Servidor Local (Puerto 8000)' },
-    { url: 'http://localhost:3000', description: 'Servidor Local (Puerto 3000)' },
-    { url: 'https://grupo1uv.onrender.com', description: 'Servidor de Producción (Render)' },
-  ],
-  components: {
-    securitySchemes: {
-      BearerAuth: {
-        type: 'http',
-        scheme: 'bearer',
-        bearerFormat: 'JWT',
-        description: 'Ingrese el token JWT de Supabase Auth (Bearer eyJhbGciOi...)',
-      },
-    },
-  },
-  paths: {
-    '/api/users/register/': {
-      post: {
-        summary: 'Crea el perfil del usuario en public.user',
-        description:
-          'Crea el perfil del usuario en public.user despues de que Supabase Auth confirmo el email. El Jwt ya viene verificado, extraemos el uuid del token',
-        security: [{ BearerAuth: [] }],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: {
-                type: 'object',
-                properties: {
-                  name: { type: 'string', example: 'Juan Esteban' },
-                  last_name: { type: 'string', example: 'Meñaca' },
-                },
-                required: ['name', 'last_name'],
-              },
-            },
-          },
-        },
-        responses: {
-          201: {
-            description: 'Usuario registrado exitosamente.',
-          },
-        },
-      },
-    },
-    '/api/users/profile/': {
-      get: {
-        summary: 'Retorna el perfil del usuario autenticado.',
-        description: 'Retorna el perfil del usuario autenticado.',
-        security: [{ BearerAuth: [] }],
-        responses: {
-          200: {
-            description: 'Perfil obtenido exitosamente.',
-          },
-        },
-      },
-    },
-    '/api/subtasks/today/': {
-      get: {
-        summary: 'Vista "Hoy": subtareas agrupadas por prioridad.',
-        description:
-          'GET /api/subtasks/today/ — Vista "Hoy": subtareas agrupadas por prioridad.\n\nAgrupación:\n• overdue: target_date < hoy (más antigua primero)\n• today: target_date == hoy\n• upcoming: target_date > hoy (más cercana primero)\n\nDesempate en todos los grupos: menor estimated_hours primero.\n\nQuery params opcionales:\n• course: filtra por curso de la actividad padre\n• status: filtra por estado de la subtarea (pending, done, postponed, overdue)\n• days: limita "upcoming" a los próximos N días',
-        security: [{ BearerAuth: [] }],
-        parameters: [
-          {
-            name: 'course',
-            in: 'query',
-            description: 'Filtrar por nombre de curso o evento',
-            required: false,
-            schema: { type: 'string' },
-          },
-          {
-            name: 'days',
-            in: 'query',
-            description: 'Limitar próximas a los siguientes N días',
-            required: false,
-            schema: { type: 'integer' },
-          },
-          {
-            name: 'status',
-            in: 'query',
-            description: 'Filtrar por estado: pending, done, postponed, overdue',
-            required: false,
-            schema: { type: 'string' },
-          },
-        ],
-        responses: {
-          200: {
-            description: 'Subtareas agrupadas por prioridad.',
-          },
-        },
-      },
-    },
-  },
-};
-
-app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
-
-// Conexión Supabase (US-47)
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://gihlakkmlshgoibwnoay.supabase.co';
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdpaGxha2ttbHNoZ29pYndub2F5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA4ODMzMzYsImV4cCI6MjEwNjQ1OTMzNn0.O6LubxLInJ578EKSGfPV-GNW9lHAGVSO70yJBOVVJBw';
-
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-// Base de datos en memoria para el API (fallback resiliente)
-let eventos = [
-  {
-    id: 'evt-1',
-    nombre: 'Boda Valentina & Emilio',
-    tipo: 'Social / Boda',
-    fecha: '2026-11-20',
-    descripcion: 'Organización integral para 150 invitados en Hacienda San Antonio.',
-    hasCriticalError: false,
-    subtareas: [
-      { id: 'sub-1-1', titulo: 'Diseño e impresión de invitaciones', horasEstimadas: 2, fechaLimite: '2026-10-05', estado: 'Hecha', responsable: 'Valentina' },
-      { id: 'sub-1-2', titulo: 'Confirmar catering y menú degustación', horasEstimadas: 2, fechaLimite: 'Hoy', estado: 'Pendiente', responsable: 'Carlos Catering' },
-      { id: 'sub-1-3', titulo: 'Contratar fotógrafo profesional', horasEstimadas: 4, fechaLimite: 'Mañana', estado: 'Pendiente', responsable: 'Studio Luz' },
-      { id: 'sub-1-4', titulo: 'Reservar salón de eventos principal', horasEstimadas: 3, fechaLimite: '2026-10-15', estado: 'Pendiente', responsable: 'Hacienda San Antonio' },
-    ],
-  },
-  {
-    id: 'evt-2',
-    nombre: 'Graduación Facultad de Ingeniería - Univalle',
-    tipo: 'Institucional / Ceremonia',
-    fecha: '2026-12-15',
-    descripcion: 'Ceremonia solemne y recepción para 80 graduandos de la Universidad del Valle.',
-    hasCriticalError: false,
-    subtareas: [
-      { id: 'sub-2-1', titulo: 'Reserva del Auditorio Principal', horasEstimadas: 3, fechaLimite: '2026-11-01', estado: 'Pendiente', responsable: 'Admin Univalle' },
-      { id: 'sub-2-2', titulo: 'Impresión de actas y diplomas', horasEstimadas: 2, fechaLimite: '2026-11-10', estado: 'Pendiente', responsable: 'Editorial UV' },
-    ],
-  },
-  {
-    id: 'evt-3',
-    nombre: 'Conferencia Empresarial Tech 2026',
-    tipo: 'Corporativo / Congreso',
-    fecha: '2026-10-28',
-    descripcion: 'Congreso de transformación digital y tecnología con 300 asistentes empresariales.',
-    hasCriticalError: true,
-    alertaDetalle: 'Conflicto crítico con proveedor de sonido y bloqueo en permisos municipales.',
-    subtareas: [
-      { id: 'sub-3-1', titulo: 'Gestión urgente de catering ejecutivo', horasEstimadas: 3, fechaLimite: 'Hoy', estado: 'Pendiente', responsable: 'Proveedor Gourmet', isCatering: true },
-      { id: 'sub-3-2', titulo: 'Resolver bloqueo de sonido y tarima', horasEstimadas: 5, fechaLimite: 'Hoy', estado: 'Pendiente', responsable: 'Sonido Pro', isCritical: true },
-    ],
-  },
-];
-
-// Validaciones de Jornada y Horas (US-47 / Requerimiento 4)
-const HORAS_MIN_GESTION = 0.5;
-const HORAS_MAX_GESTION = 12;
-const LIMITE_JORNADA_DEFAULT = 8;
-
-function validarSubtareasPayload(subtareas, limiteJornada = LIMITE_JORNADA_DEFAULT) {
-  if (!subtareas || !Array.isArray(subtareas)) return null;
-
-  for (const sub of subtareas) {
-    const horas = Number(sub.horasEstimadas ?? sub.horas_estimadas);
-    if (isNaN(horas) || horas < HORAS_MIN_GESTION || horas > HORAS_MAX_GESTION) {
-      return `Las horas estimadas de la gestión "${sub.titulo || 'Sin título'}" deben estar entre ${HORAS_MIN_GESTION} y ${HORAS_MAX_GESTION} horas.`;
-    }
-  }
-
-  // Agrupar y validar carga horaria por jornada
-  const horasPorFecha = {};
-  for (const sub of subtareas) {
-    const fecha = sub.fechaLimite || sub.fecha_limite || 'General';
-    const horas = Number(sub.horasEstimadas ?? sub.horas_estimadas) || 0;
-    horasPorFecha[fecha] = (horasPorFecha[fecha] || 0) + horas;
-  }
-
-  for (const [fecha, total] of Object.entries(horasPorFecha)) {
-    if (total > limiteJornada) {
-      return `La jornada "${fecha}" acumula ${total}h, excediendo el límite diario de ${limiteJornada}h. Rebalancee la carga horaria.`;
-    }
-  }
-
-  return null;
+if (process.env.NODE_ENV !== 'test') {
+  app.listen(port, () => {
+    console.log(`Backend de Eventify API escuchando en http://localhost:${port}`);
+    console.log(`Documentación Swagger interactiva en http://localhost:${port}/api/docs`);
+  });
 }
 
-// Extractor de usuario para aislamiento de datos (Requerimiento 5)
-function getUserIdFromReq(req) {
-  if (req.headers['x-user-id']) return req.headers['x-user-id'];
-  const auth = req.headers['authorization'];
-  if (auth && auth.startsWith('Bearer ')) {
-    const token = auth.slice(7);
-    try {
-      const parts = token.split('.');
-      if (parts.length === 3) {
-        const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString());
-        if (payload.sub) return payload.sub;
-        if (payload.user_id) return payload.user_id;
-        if (payload.uuid) return payload.uuid;
-      }
-    } catch {
-      // Ignorar si el token es opaco
-    }
-  }
-  return null;
-}
-
-// Health Check
-app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, servicio: 'organizador-eventos-api', timestamp: new Date().toISOString() });
-});
-
-// GET /api/eventos (lee de Supabase con fallback a memoria, filtrado por usuario)
-app.get('/api/eventos', async (req, res) => {
-  const userId = getUserIdFromReq(req);
-  try {
-    let query = supabase.from('events').select('*');
-    if (userId) {
-      query = query.or(`user_id.eq.${userId},user_id.is.null`);
-    }
-    const { data: dbEvents, error } = await query;
-    const { data: dbSubtasks } = await supabase.from('subtasks').select('*');
-    if (!error && dbEvents && dbEvents.length > 0) {
-      const merged = dbEvents.map((evt) => ({
-        id: evt.id,
-        userId: evt.user_id,
-        user_id: evt.user_id,
-        nombre: evt.nombre,
-        tipo: evt.tipo,
-        fecha: evt.fecha,
-        lugar: evt.lugar || '',
-        asistentes: evt.asistentes || 0,
-        descripcion: evt.descripcion || '',
-        hasCriticalError: evt.has_critical_error,
-        subtareas: (dbSubtasks || [])
-          .filter((s) => s.event_id === evt.id)
-          .map((s) => ({
-            id: s.id,
-            titulo: s.titulo,
-            horasEstimadas: s.horas_estimadas,
-            fechaLimite: s.fecha_limite,
-            estado: s.estado,
-            responsable: s.responsable,
-            isCatering: s.is_catering,
-            isCritical: s.is_critical,
-          })),
-      }));
-      return res.json({ ok: true, data: merged, total: merged.length, source: 'supabase' });
-    }
-  } catch (e) {
-    console.warn('Fallback a eventos locales:', e);
-  }
-
-  const localesFiltrados = userId
-    ? eventos.filter((e) => !e.userId || e.userId === userId)
-    : eventos;
-  res.json({ ok: true, data: localesFiltrados, total: localesFiltrados.length, source: 'local' });
-});
-
-// GET /api/eventos/:id
-app.get('/api/eventos/:id', (req, res) => {
-  const evento = eventos.find((e) => e.id === req.params.id);
-  if (!evento) {
-    return res.status(404).json({ ok: false, error: 'Evento no encontrado' });
-  }
-  res.json({ ok: true, data: evento });
-});
-
-// POST /api/eventos (T1)
-app.post('/api/eventos', async (req, res) => {
-  const userId = getUserIdFromReq(req) || req.body.userId || req.body.user_id || '00260f2c-7cfb-411d-be11-61e1e2099d3e';
-  const { nombre, tipo, fecha, descripcion, lugar, asistentes, subtareas, limiteHorasPorJornada } = req.body;
-
-  if (!nombre || !nombre.trim()) {
-    return res.status(400).json({ ok: false, error: 'El nombre del evento es obligatorio.' });
-  }
-
-  const errSub = validarSubtareasPayload(subtareas, limiteHorasPorJornada);
-  if (errSub) {
-    return res.status(400).json({ ok: false, error: errSub });
-  }
-
-  const id = `evt-${Date.now()}`;
-  const nuevoEvento = {
-    id,
-    userId,
-    user_id: userId,
-    nombre: nombre.trim(),
-    tipo: tipo || 'General',
-    fecha: fecha || new Date().toISOString().split('T')[0],
-    lugar: lugar || '',
-    asistentes: Number(asistentes) || 0,
-    descripcion: descripcion || '',
-    hasCriticalError: false,
-    subtareas: subtareas || [],
-  };
-
-  eventos.unshift(nuevoEvento);
-
-  try {
-    await supabase.from('events').insert({
-      id: nuevoEvento.id,
-      user_id: nuevoEvento.user_id,
-      nombre: nuevoEvento.nombre,
-      tipo: nuevoEvento.tipo,
-      fecha: nuevoEvento.fecha,
-      lugar: nuevoEvento.lugar,
-      asistentes: nuevoEvento.asistentes,
-      descripcion: nuevoEvento.descripcion,
-      has_critical_error: nuevoEvento.hasCriticalError,
-    });
-  } catch (e) {
-    console.warn('Error guardando evento en Supabase:', e);
-  }
-
-  res.status(201).json({ ok: true, data: nuevoEvento });
-});
-
-// PUT /api/eventos/:id (T3 / Reprogramar)
-app.put('/api/eventos/:id', (req, res) => {
-  const index = eventos.findIndex((e) => e.id === req.params.id);
-  if (index === -1) {
-    return res.status(404).json({ ok: false, error: 'Evento no encontrado' });
-  }
-
-  const { subtareas, limiteHorasPorJornada } = req.body;
-  if (subtareas) {
-    const errSub = validarSubtareasPayload(subtareas, limiteHorasPorJornada);
-    if (errSub) {
-      return res.status(400).json({ ok: false, error: errSub });
-    }
-  }
-
-  eventos[index] = { ...eventos[index], ...req.body };
-  res.json({ ok: true, data: eventos[index] });
-});
-
-// DELETE /api/eventos/:id (Decisión 4)
-app.delete('/api/eventos/:id', (req, res) => {
-  const index = eventos.findIndex((e) => e.id === req.params.id);
-  if (index === -1) {
-    return res.status(404).json({ ok: false, error: 'Evento no encontrado' });
-  }
-
-  const eliminado = eventos.splice(index, 1)[0];
-  res.json({ ok: true, message: 'Evento eliminado definitivamente', data: eliminado });
-});
-
-// GET /api/tareas/hoy (T2 - Legacy Sprint 1)
-app.get('/api/tareas/hoy', (_req, res) => {
-  const tareas = [];
-  eventos.forEach((evt) => {
-    (evt.subtareas || []).forEach((sub) => {
-      if (sub.fechaLimite === 'Hoy' || sub.fechaLimite === 'Mañana') {
-        tareas.push({
-          ...sub,
-          eventoId: evt.id,
-          eventoNombre: evt.nombre,
-        });
-      }
-    });
-  });
-  res.json({ ok: true, data: tareas, total: tareas.length });
-});
-
-// ============================================================================
-// ENDPOINTS SPRINT 2 (US-04, US-05, US-11 - Estándar DRF / REST)
-// ============================================================================
-
-// POST /api/users/register/ (US-04 / US-11)
-app.post(['/api/users/register', '/api/users/register/'], (req, res) => {
-  const { name, last_name } = req.body || {};
-  const userName = name || 'Grosman';
-  const userLastName = last_name || 'Garcia';
-  const uuid_user = '97218ea0-c504-4f50-a557-85884dfb4c81';
-
-  res.status(201).json({
-    status: 'success',
-    message: 'Usuario registrado exitosamente.',
-    data: {
-      user_id: 18,
-      uuid_user: uuid_user,
-      name: userName,
-      last_name: userLastName,
-      streak_current: 0,
-      streak_last_day: null,
-      streak_best: 0,
-    },
-  });
-});
-
-// GET /api/users/profile/ (US-04 / US-11)
-app.get(['/api/users/profile', '/api/users/profile/'], (req, res) => {
-  const authHeader = req.headers['authorization'];
-  if (!authHeader) {
-    return res.status(401).json({
-      status: 'error',
-      message: 'Las credenciales de autenticación no fueron proveídas.',
-    });
-  }
-
-  res.status(200).json({
-    status: 'success',
-    data: {
-      user_id: 18,
-      uuid_user: '97218ea0-c504-4f50-a557-85884dfb4c81',
-      name: 'Grosman',
-      last_name: 'Garcia',
-      streak_current: 0,
-      streak_last_day: null,
-      streak_best: 0,
-      limit_hours_day: userCapacities[getUserIdFromReq(req) || 'default'] || 6,
-    },
-  });
-});
-
-// Memoria de capacidad diaria por usuario (Sprint 3: Módulo 2)
-const userCapacities = {};
-
-// GET /api/users/capacity (Módulo 2: Consultar capacidad diaria)
-app.get(['/api/users/capacity', '/api/users/capacity/'], (req, res) => {
-  const userId = getUserIdFromReq(req) || 'default';
-  const limitHoursDay = userCapacities[userId] || 6;
-  res.status(200).json({
-    ok: true,
-    status: 'success',
-    data: {
-      limitHoursDay,
-      limiteDiario: limitHoursDay,
-    },
-  });
-});
-
-// PUT / PATCH /api/users/capacity (Módulo 2: Modificar capacidad diaria 1-16 horas)
-app.all(['/api/users/capacity', '/api/users/capacity/', '/api/users/limit-hours', '/api/users/limit-hours/'], (req, res, next) => {
-  if (req.method !== 'PUT' && req.method !== 'PATCH' && req.method !== 'POST') return next();
-  const userId = getUserIdFromReq(req) || 'default';
-  const raw = req.body?.limitHoursDay ?? req.body?.limiteDiario ?? req.body?.limit_hours_day;
-  let val = 6;
-
-  if (raw === '' || raw === null || raw === undefined) {
-    val = 6;
-  } else {
-    val = Number(raw);
-    if (!Number.isFinite(val) || val < 1 || val > 16) {
-      return res.status(400).json({
-        ok: false,
-        status: 'error',
-        error: 'El valor debe estar entre 1 y 16',
-        message: 'El valor debe estar entre 1 y 16',
-      });
-    }
-  }
-
-  const sanitized = Math.round(val * 10) / 10;
-  userCapacities[userId] = sanitized;
-
-  res.status(200).json({
-    ok: true,
-    status: 'success',
-    message: 'Límite actualizado',
-    data: {
-      limitHoursDay: sanitized,
-      limiteDiario: sanitized,
-    },
-  });
-});
-
-// Helper de fechas para subtasks y cálculo de sobrecarga
-const getTodayIso = () => new Date().toISOString().split('T')[0];
-
-const normalizeSubtaskDate = (fechaStr, todayIso = getTodayIso()) => {
-  if (!fechaStr) return '2026-12-31';
-  const str = String(fechaStr).trim().toLowerCase();
-  if (str === 'hoy') return todayIso;
-  if (str === 'mañana' || str === 'manana') {
-    const d = new Date();
-    d.setDate(d.getDate() + 1);
-    return d.toISOString().split('T')[0];
-  }
-  if (str.includes('semana')) {
-    const d = new Date();
-    d.setDate(d.getDate() + 7);
-    return d.toISOString().split('T')[0];
-  }
-  if (/^\d{4}-\d{2}-\d{2}$/.test(fechaStr)) {
-    return fechaStr;
-  }
-  const ddmmyyyy = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(fechaStr);
-  if (ddmmyyyy) {
-    const d = ddmmyyyy[1].padStart(2, '0');
-    const m = ddmmyyyy[2].padStart(2, '0');
-    const y = ddmmyyyy[3];
-    return `${y}-${m}-${d}`;
-  }
-  return '2026-12-31';
-};
-
-// PATCH / PUT /api/subtasks/:id (Sprint 3: Módulo 3 y 4 - Actualización y reprogramación con detección de sobrecarga)
-app.all(['/api/subtasks/:id', '/api/subtasks/:id/'], (req, res, next) => {
-  if (req.method !== 'PATCH' && req.method !== 'PUT') return next();
-
-  const subId = req.params.id;
-  const { fechaLimite, target_date, horasEstimadas, estimated_hours, estado, status } = req.body || {};
-
-  let targetSubtask = null;
-  let targetEvent = null;
-
-  for (const evt of eventos) {
-    const found = (evt.subtareas || []).find((s) => String(s.id) === String(subId));
-    if (found) {
-      targetSubtask = found;
-      targetEvent = evt;
-      break;
-    }
-  }
-
-  if (!targetSubtask) {
-    return res.status(404).json({
-      ok: false,
-      status: 'error',
-      error: 'Subtarea no encontrada',
-      message: 'Ha ocurrido un error al intentar actualizar la subtarea. Inténtelo de nuevo.',
-    });
-  }
-
-  const userId = getUserIdFromReq(req) || 'default';
-  const limitHoursDay = userCapacities[userId] || 6;
-
-  const nuevaFecha = fechaLimite || target_date;
-  const nuevasHoras = horasEstimadas !== undefined ? horasEstimadas : estimated_hours;
-
-  const fechaDestino = nuevaFecha !== undefined ? nuevaFecha : targetSubtask.fechaLimite;
-  const horasDestino = nuevasHoras !== undefined ? Number(nuevasHoras) : (Number(targetSubtask.horasEstimadas) || 0);
-
-  const todayIso = getTodayIso();
-  const fechaDestinoNorm = normalizeSubtaskDate(fechaDestino, todayIso);
-
-  // Sumar horas ya asignadas en esa fecha excluyendo la subtarea que se actualiza y aisladas por usuario
-  let horasAsignadasEnFecha = 0;
-  for (const evt of eventos) {
-    if (userId && evt.userId && evt.userId !== userId) continue;
-    for (const sub of (evt.subtareas || [])) {
-      if (String(sub.id) !== String(targetSubtask.id) && sub.estado !== 'Hecha') {
-        if (normalizeSubtaskDate(sub.fechaLimite, todayIso) === fechaDestinoNorm) {
-          horasAsignadasEnFecha += Number(sub.horasEstimadas) || 0;
-        }
-      }
-    }
-  }
-
-  const horasTotalesCalculadas = Math.round((horasAsignadasEnFecha + horasDestino) * 10) / 10;
-
-  // SPRINT 3: Si la suma supera el límite diario configurado, rechazar con 409 Conflict y overload_conflict
-  if (horasTotalesCalculadas > limitHoursDay) {
-    return res.status(409).json({
-      ok: false,
-      status: 'error',
-      error: 'overload_conflict',
-      code: 'overload_conflict',
-      message: `Quedarías con ${horasTotalesCalculadas}h planificadas (límite ${limitHoursDay}h)`,
-      data: {
-        error: 'overload_conflict',
-        horas_totales_calculadas: horasTotalesCalculadas,
-        horasTotales: horasTotalesCalculadas,
-        limite_actual_usuario: limitHoursDay,
-        limiteDiario: limitHoursDay,
-        fecha: fechaDestino,
-        subtareaAfectada: targetSubtask,
-      },
-    });
-  }
-
-  let fechaCambiada = false;
-  let horasCambiadas = false;
-
-  if (nuevaFecha !== undefined && nuevaFecha !== targetSubtask.fechaLimite) {
-    targetSubtask.fechaLimite = nuevaFecha;
-    targetSubtask.estado = 'POSTERGADA'; // Transición automática obligatoria SPRINT 3
-    fechaCambiada = true;
-  }
-
-  if (nuevasHoras !== undefined) {
-    targetSubtask.horasEstimadas = Number(nuevasHoras);
-    horasCambiadas = true;
-  }
-
-  if (estado) {
-    targetSubtask.estado = estado;
-  } else if (status === 'postponed' || status === 'POSTERGADA') {
-    targetSubtask.estado = 'POSTERGADA';
-  }
-
-  // Notificación explícita según tipo de cambio (Módulo 4)
-  let successMessage = 'La fecha de la subtarea se actualizó correctamente.';
-  if (fechaCambiada && horasCambiadas) {
-    successMessage = 'La fecha y las horas de la subtarea se actualizaron correctamente.';
-  } else if (horasCambiadas) {
-    successMessage = 'Las horas de la subtarea se actualizaron correctamente.';
-  }
-
-  res.status(200).json({
-    ok: true,
-    status: 'success',
-    message: successMessage,
-    data: {
-      ...targetSubtask,
-      eventoId: targetEvent?.id,
-    },
-  });
-});
-
-// GET /api/subtasks/today/ (US-05 / US-11)
-app.get(['/api/subtasks/today', '/api/subtasks/today/'], (req, res) => {
-  const authHeader = req.headers['authorization'];
-  if (!authHeader) {
-    return res.status(401).json({
-      status: 'error',
-      message: 'Las credenciales de autenticación no fueron proveídas.',
-    });
-  }
-
-  const { course, event, days, status } = req.query;
-  const todayIso = getTodayIso();
-
-  // Aplanar todas las subtareas con formato DRF aisladas por usuario
-  let flatSubtasks = [];
-  let subtaskCounter = 20;
-
-  const userId = getUserIdFromReq(req);
-  const eventosActivos = userId
-    ? eventos.filter((e) => !e.userId || e.userId === userId)
-    : eventos;
-
-  eventosActivos.forEach((evt, evtIndex) => {
-    const evtNumId = 80 + evtIndex;
-    (evt.subtareas || []).forEach((sub) => {
-      subtaskCounter += 1;
-      const targetDate = normalizeSubtaskDate(sub.fechaLimite, todayIso);
-      
-      // Mapeo de estado estándar DRF
-      let mappedStatus = 'pending';
-      if (sub.estado === 'Hecha') mappedStatus = 'done';
-      else if (sub.estado === 'Pospuesta' || sub.estado === 'POSTERGADA' || sub.estado === 'postergada' || sub.fechaLimite === 'Próxima semana') mappedStatus = 'postponed';
-      else if (targetDate < todayIso) mappedStatus = 'overdue';
-
-      flatSubtasks.push({
-        id: subtaskCounter,
-        title: sub.titulo,
-        description: sub.responsable ? `Responsable: ${sub.responsable}` : '',
-        status: mappedStatus,
-        target_date: targetDate,
-        estimated_hours: sub.horasEstimadas || 2,
-        parent_activity: {
-          id: evtNumId,
-          title: evt.nombre,
-          type: evt.tipo.toLowerCase().includes('boda') ? 'social' : 'project',
-          course: evt.nombre,
-          weight: null,
-          due_date: evt.fecha,
-        },
-      });
-    });
-  });
-
-  // Filtro por curso / evento
-  const filtroCurso = (course || event || '').toLowerCase().trim();
-  if (filtroCurso) {
-    flatSubtasks = flatSubtasks.filter(
-      (item) =>
-        item.parent_activity.title.toLowerCase().includes(filtroCurso) ||
-        item.parent_activity.course.toLowerCase().includes(filtroCurso) ||
-        String(item.parent_activity.id) === filtroCurso
-    );
-  }
-
-  // Filtro por estado
-  if (status) {
-    const filtroStatus = status.toLowerCase().trim();
-    flatSubtasks = flatSubtasks.filter((item) => item.status === filtroStatus);
-  }
-
-  // Agrupación en overdue, today, upcoming
-  let overdue = flatSubtasks.filter((item) => item.target_date < todayIso);
-  let today = flatSubtasks.filter((item) => item.target_date === todayIso);
-  let upcoming = flatSubtasks.filter((item) => item.target_date > todayIso);
-
-  // Filtro por días para "upcoming"
-  if (days) {
-    const numDays = parseInt(days, 10);
-    if (!isNaN(numDays) && numDays > 0) {
-      const limitDate = new Date();
-      limitDate.setDate(limitDate.getDate() + numDays);
-      const limitIso = limitDate.toISOString().split('T')[0];
-      upcoming = upcoming.filter((item) => item.target_date <= limitIso);
-    }
-  }
-
-  // Ordenamiento cronológico con desempate por menor estimated_hours
-  const sortByDateAndHoursAsc = (a, b) => {
-    if (a.target_date !== b.target_date) {
-      return a.target_date.localeCompare(b.target_date);
-    }
-    return (a.estimated_hours || 0) - (b.estimated_hours || 0);
-  };
-
-  overdue.sort(sortByDateAndHoursAsc);
-  today.sort((a, b) => (a.estimated_hours || 0) - (b.estimated_hours || 0));
-  upcoming.sort(sortByDateAndHoursAsc);
-
-  res.status(200).json({
-    status: 'success',
-    data: {
-      overdue,
-      today,
-      upcoming,
-    },
-  });
-});
-
-app.listen(port, () => {
-  console.log(`Backend de Eventify API escuchando en http://localhost:${port}`);
-});
+export default app;
