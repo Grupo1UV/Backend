@@ -235,8 +235,101 @@ export const swaggerDocument = {
         },
       },
     },
+    '/api/activities/': {
+      get: {
+        tags: ['Subtareas y Gestiones Logísticas'],
+        summary: 'Listar todas las actividades y gestiones del usuario autenticado',
+        description:
+          'Retorna el listado completo de subtareas/actividades pertenecientes a los eventos del usuario autenticado, asociadas a su respectivo evento y con cálculo de estado.',
+        security: [{ BearerAuth: [] }],
+        parameters: [
+          {
+            name: 'eventoId',
+            in: 'query',
+            required: false,
+            schema: { type: 'string' },
+            description: 'Filtrar actividades por ID del evento',
+          },
+          {
+            name: 'estado',
+            in: 'query',
+            required: false,
+            schema: { type: 'string', enum: ['Pendiente', 'Hecha', 'POSTERGADA'] },
+            description: 'Filtrar actividades por estado',
+          },
+        ],
+        responses: {
+          200: {
+            description: 'Listado de actividades obtenido exitosamente',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    ok: { type: 'boolean', example: true },
+                    status: { type: 'string', example: 'success' },
+                    total: { type: 'integer', example: 5 },
+                    data: {
+                      type: 'array',
+                      items: { $ref: '#/components/schemas/Subtarea' },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          401: { description: 'Token de autenticación faltante o inválido' },
+        },
+      },
+    },
+    '/api/activities': {
+      get: {
+        tags: ['Subtareas y Gestiones Logísticas'],
+        summary: 'Listar todas las actividades y gestiones (alias sin barra diagonal final)',
+        security: [{ BearerAuth: [] }],
+        parameters: [
+          {
+            name: 'eventoId',
+            in: 'query',
+            required: false,
+            schema: { type: 'string' },
+            description: 'Filtrar actividades por ID del evento',
+          },
+          {
+            name: 'estado',
+            in: 'query',
+            required: false,
+            schema: { type: 'string', enum: ['Pendiente', 'Hecha', 'POSTERGADA'] },
+            description: 'Filtrar actividades por estado',
+          },
+        ],
+        responses: {
+          200: {
+            description: 'Listado de actividades obtenido exitosamente',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    ok: { type: 'boolean', example: true },
+                    status: { type: 'string', example: 'success' },
+                    total: { type: 'integer', example: 5 },
+                    data: {
+                      type: 'array',
+                      items: { $ref: '#/components/schemas/Subtarea' },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          401: { description: 'Token de autenticación faltante o inválido' },
+        },
+      },
+    },
     '/api/events/{id}/tasks': {
       post: {
+        tags: ['Subtareas y Gestiones Logísticas'],
         summary: 'Registrar una nueva subtarea logística para un evento (US-07 / C1)',
         security: [{ BearerAuth: [] }],
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
@@ -267,6 +360,7 @@ export const swaggerDocument = {
     },
     '/api/subtasks/today': {
       get: {
+        tags: ['Subtareas y Gestiones Logísticas'],
         summary: 'Vista "Hoy" con priorización cronológica (US-12 / C3)',
         security: [{ BearerAuth: [] }],
         responses: {
@@ -276,6 +370,7 @@ export const swaggerDocument = {
     },
     '/api/subtareas/{id}/estado': {
       patch: {
+        tags: ['Subtareas y Gestiones Logísticas'],
         summary: 'Cambiar estado de subtarea con nota opcional (US-16, US-17, US-18 / C1)',
         security: [{ BearerAuth: [] }],
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
@@ -304,6 +399,7 @@ export const swaggerDocument = {
     },
     '/api/subtasks/{id}': {
       patch: {
+        tags: ['Subtareas y Gestiones Logísticas'],
         summary: 'Reprogramar subtarea (fecha y horas) con detección de sobrecarga (Criterio Sobrecarga)',
         security: [{ BearerAuth: [] }],
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
@@ -328,6 +424,7 @@ export const swaggerDocument = {
         },
       },
       delete: {
+        tags: ['Subtareas y Gestiones Logísticas'],
         summary: 'Eliminar una subtarea logística',
         security: [{ BearerAuth: [] }],
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],

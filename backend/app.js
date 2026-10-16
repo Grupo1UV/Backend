@@ -71,6 +71,13 @@ export function createApp(customRepo = null, customSecret = DEFAULT_AUTH_SECRET)
   // Subtareas y vista "Hoy" (US-12 a US-15, C3)
   app.get(['/api/subtasks/today', '/api/subtasks/today/', '/api/tareas/hoy'], authGuard, subtasksCtrl.getToday);
 
+  // Listado general de actividades/subtareas (GET /api/activities/, /api/subtasks/)
+  app.get(
+    ['/api/activities', '/api/activities/', '/api/actividades', '/api/actividades/', '/api/subtasks', '/api/subtasks/'],
+    authGuard,
+    subtasksCtrl.listActivities
+  );
+
   // Cambio de estado con nota opcional (US-16 a US-18, C1 / C5)
   app.patch(['/api/subtareas/:id/estado', '/api/subtareas/:id/estado/', '/api/subtasks/:id/estado', '/api/subtasks/:id/status'], authGuard, subtasksCtrl.changeStatus);
 

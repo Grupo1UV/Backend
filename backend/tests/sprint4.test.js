@@ -745,6 +745,48 @@ describe('Suite de Pruebas Sprint 4 — Organizador de Eventos Independientes', 
     assert.match(bodyUpdate.error?.message || bodyUpdate.message, /Hay gestiones que vencen después de la fecha del evento/);
   });
 
+  it('23. Listar todas las actividades con GET /api/activities/ y filtrar por evento/estado', async () => {
+    // Probar GET /api/activities/ con tokenUser1
+    const res = await fetch(`${baseUrl}/api/activities/`, {
+      headers: { Authorization: `Bearer ${tokenUser1}` },
+    });
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.ok, true);
+    assert.strictEqual(body.status, 'success');
+    assert.ok(Array.isArray(body.data));
+    assert.strictEqual(body.total, body.data.length);
+    assert.ok(body.total > 0);
+
+    // Probar alias sin barra diagonal /api/activities
+    const resAlias = await fetch(`${baseUrl}/api/activities`, {
+      headers: { Authorization: `Bearer ${tokenUser1}` },
+    });
+    assert.strictEqual(resAlias.status, 200);
+    const bodyAlias = await resAlias.json();
+    assert.strictEqual(bodyAlias.total, body.total);
+
+    // Cada actividad debe tener los campos requeridos y el nombre de su evento
+    const primera = body.data[0];
+    assert.ok(primera.id);
+    assert.ok(primera.eventoId);
+    assert.ok(primera.titulo);
+    assert.ok(primera.eventoNombre);
+
+    // Probar filtro por evento
+    const evtId = primera.eventoId;
+    const resFiltered = await fetch(`${baseUrl}/api/activities/?eventoId=${evtId}`, {
+      headers: { Authorization: `Bearer ${tokenUser1}` },
+    });
+    assert.strictEqual(resFiltered.status, 200);
+    const bodyFiltered = await resFiltered.json();
+    assert.ok(bodyFiltered.data.every((t) => t.eventoId === evtId));
+
+    // Rechazar sin autenticación
+    const resNoAuth = await fetch(`${baseUrl}/api/activities/`);
+    assert.strictEqual(resNoAuth.status, 401);
+  });
+
   after(async () => {
     if (server) {
       await new Promise((resolve) => server.close(resolve));

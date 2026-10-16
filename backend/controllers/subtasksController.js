@@ -60,6 +60,36 @@ export function createSubtasksController(repo) {
       });
     }),
 
+    listActivities: asyncHandler(async (req, res) => {
+      const { events, subtasks } = await loadUserSubtasks(repo, req.userId);
+      const eventsMap = new Map(events.map((e) => [e.id, e]));
+
+      let data = subtasks.map((s) => ({
+        ...s,
+        eventoNombre: eventsMap.get(s.eventoId)?.nombre || 'Evento',
+        hasCriticalError: !!eventsMap.get(s.eventoId)?.has_critical_error,
+      }));
+
+      const { eventoId, event_id, estado, status } = req.query || {};
+      const targetEventId = eventoId || event_id;
+      if (targetEventId) {
+        data = data.filter((s) => s.eventoId === targetEventId);
+      }
+      if (estado || status) {
+        const targetEstado = normalizarEstado(estado || status);
+        if (targetEstado) {
+          data = data.filter((s) => s.estado === targetEstado);
+        }
+      }
+
+      return res.status(200).json({
+        ok: true,
+        status: 'success',
+        total: data.length,
+        data,
+      });
+    }),
+
     changeStatus: asyncHandler(async (req, res) => {
       const { sub, ev } = await loadOwnedSubtask(repo, req.userId, req.params.id);
       const { estado, status, nota, note, fechaLimite, target_date } = req.body || {};
