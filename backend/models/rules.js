@@ -134,7 +134,7 @@ export function calcularProgreso(subtareas = []) {
     gestiones_hechas: hechas,
     gestiones_pendientes: pendientes,
     gestiones_pospuestas: pospuestas,
-    porcentaje_progreso: total === 0 ? 0 : redondear((hechas / total) * 100),
+    porcentaje_progreso: total === 0 ? 0 : Math.round((hechas / total) * 100),
   };
 }
 
