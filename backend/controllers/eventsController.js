@@ -109,7 +109,7 @@ export function createEventsController(repo) {
         }
       }
 
-      const eventId = `evt-${Date.now()}`;
+      const eventId = `evt-${req.userId}--${Date.now()}`;
       const newEvent = await repo.insertEvent({
         id: eventId,
         user_id: req.userId,

@@ -5,12 +5,17 @@ import {
 import {
   validarLimite,
   LIMITE_DEFAULT,
+  cargaPorFecha,
+  evaluarSobrecarga,
+  hoyIso,
 } from '../models/rules.js';
 import {
   asyncHandler,
   badRequest,
   HttpError,
   getUserLimit,
+  loadUserSubtasks,
+  toRuleTask,
 } from './helpers.js';
 
 export function createAuthController(repo, tokenService) {
@@ -135,12 +140,24 @@ export function createAuthController(repo, tokenService) {
 
     getCapacity: asyncHandler(async (req, res) => {
       const limite = await getUserLimit(repo, req.userId);
+      const { subtasks } = await loadUserSubtasks(repo, req.userId);
+      const todayDate = hoyIso();
+      const ruleTasks = subtasks.map(toRuleTask);
+      const cargas = cargaPorFecha(ruleTasks);
+      const horasPendientesHoy = Math.round((cargas[todayDate] || 0) * 10) / 10;
+      const horasDisponiblesHoy = Math.max(0, Math.round((limite - horasPendientesHoy) * 10) / 10);
+      const evalRes = evaluarSobrecarga({ tareas: ruleTasks, cambios: ruleTasks, limite });
+
       return res.status(200).json({
         ok: true,
         status: 'success',
         data: {
           limitHoursDay: limite,
           limiteDiario: limite,
+          horasPendientesHoy,
+          horasDisponiblesHoy,
+          haySobrecarga: evalRes.hayConflicto,
+          conflictosSobrecarga: evalRes.conflictos,
         },
       });
     }),
@@ -156,6 +173,14 @@ export function createAuthController(repo, tokenService) {
       const sanitized = Math.round(val * 10) / 10;
       await repo.updateUser(req.userId, { limite_horas_dia: sanitized });
 
+      const { subtasks } = await loadUserSubtasks(repo, req.userId);
+      const todayDate = hoyIso();
+      const ruleTasks = subtasks.map(toRuleTask);
+      const cargas = cargaPorFecha(ruleTasks);
+      const horasPendientesHoy = Math.round((cargas[todayDate] || 0) * 10) / 10;
+      const horasDisponiblesHoy = Math.max(0, Math.round((sanitized - horasPendientesHoy) * 10) / 10);
+      const evalRes = evaluarSobrecarga({ tareas: ruleTasks, cambios: ruleTasks, limite: sanitized });
+
       return res.status(200).json({
         ok: true,
         status: 'success',
@@ -163,6 +188,10 @@ export function createAuthController(repo, tokenService) {
         data: {
           limitHoursDay: sanitized,
           limiteDiario: sanitized,
+          horasPendientesHoy,
+          horasDisponiblesHoy,
+          haySobrecarga: evalRes.hayConflicto,
+          conflictosSobrecarga: evalRes.conflictos,
         },
       });
     }),

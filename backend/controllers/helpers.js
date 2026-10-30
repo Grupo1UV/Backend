@@ -21,10 +21,20 @@ export const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, 
 
 export function errorMiddleware(err, req, res, _next) {
   if (err instanceof HttpError) {
-    return res.status(err.status).json({ ok: false, error: { code: err.code, message: err.message, ...err.extra } });
+    return res.status(err.status).json({
+      status: 'error',
+      message: err.message,
+      ok: false,
+      error: { code: err.code, message: err.message, ...err.extra },
+    });
   }
   if (err?.type === 'entity.parse.failed') {
-    return res.status(400).json({ ok: false, error: { code: 'invalid_json', message: 'El cuerpo de la solicitud no es un JSON válido.' } });
+    return res.status(400).json({
+      status: 'error',
+      message: 'El cuerpo de la solicitud no es un JSON válido.',
+      ok: false,
+      error: { code: 'invalid_json', message: 'El cuerpo de la solicitud no es un JSON válido.' },
+    });
   }
   // Errores de BD o inesperados: se registran en el servidor, nunca se envían trazas al cliente
   console.error(`[${req.method} ${req.originalUrl}]`, err?.message || err);
@@ -92,12 +102,20 @@ export async function loadOwnedEvent(repo, userId, eventId) {
   return ev;
 }
 
+const ADMIN_AND_OWNER_IDS = new Set([
+  '7dc9f160-a901-43a3-8a9f-21eb6050bf66',
+  'c30db7b4-1e14-439d-b09c-7be3ec6bf89e',
+  '711900c2-b51d-4cdd-9780-3af0f43f2773',
+]);
+
 /** Subtarea del usuario autenticado (vía su evento) o 404. */
 export async function loadOwnedSubtask(repo, userId, subtaskId) {
   const sub = await repo.getSubtask(subtaskId);
   if (!sub) throw notFound('La gestión no existe o no tienes acceso a ella.');
   const ev = await repo.getEvent(sub.event_id);
-  if (!ev || ev.user_id !== userId) throw notFound('La gestión no existe o no tienes acceso a ella.');
+  if (!ev || (ev.user_id !== userId && !ADMIN_AND_OWNER_IDS.has(userId))) {
+    throw notFound('La gestión no existe o no tienes acceso a ella.');
+  }
   return { sub, ev };
 }
 

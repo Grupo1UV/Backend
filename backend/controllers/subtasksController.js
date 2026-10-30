@@ -1,6 +1,7 @@
 import {
   agruparHoy,
   evaluarSobrecarga,
+  cargaPorFecha,
   validarHoras,
   normalizarFecha,
   normalizarEstado,
@@ -37,12 +38,25 @@ export function createSubtasksController(repo) {
 
       const todayDate = hoyIso();
       const grupos = agruparHoy(enriched, todayDate);
+      const limite = await getUserLimit(repo, req.userId);
+      const ruleTasks = enriched.map(toRuleTask);
+      const cargas = cargaPorFecha(ruleTasks);
+      const horasPendientesHoy = Math.round((cargas[todayDate] || 0) * 10) / 10;
+      const horasDisponiblesHoy = Math.max(0, Math.round((limite - horasPendientesHoy) * 10) / 10);
+      const excesoHoy = Math.max(0, Math.round((horasPendientesHoy - limite) * 10) / 10);
+      const sobrecarga = evaluarSobrecarga({ tareas: ruleTasks, cambios: ruleTasks, limite });
 
       // Formato compatible tanto con la UI moderna como con la especificación DRF
       return res.status(200).json({
         ok: true,
         status: 'success',
         fechaHoy: todayDate,
+        limiteDiario: limite,
+        horasPendientesHoy,
+        horasDisponiblesHoy,
+        excesoHoy,
+        haySobrecarga: sobrecarga.hayConflicto,
+        conflictosSobrecarga: sobrecarga.conflictos,
         data: {
           overdue: grupos.vencidas,
           today: grupos.hoy,
@@ -51,11 +65,21 @@ export function createSubtasksController(repo) {
           vencidas: grupos.vencidas,
           paraHoy: grupos.hoy,
           proximas: grupos.proximas,
+          limiteDiario: limite,
+          horasPendientesHoy,
+          horasDisponiblesHoy,
+          excesoHoy,
+          haySobrecarga: sobrecarga.hayConflicto,
+          conflictosSobrecarga: sobrecarga.conflictos,
         },
         kpis: {
           vencidas: grupos.vencidas.length,
           urgentesHoy: grupos.hoy.length,
           proximas: grupos.proximas.length,
+          limiteDiario: limite,
+          horasPendientesHoy,
+          horasDisponiblesHoy,
+          excesoHoy,
         },
       });
     }),
@@ -87,6 +111,25 @@ export function createSubtasksController(repo) {
         status: 'success',
         total: data.length,
         data,
+      });
+    }),
+
+    getActivity: asyncHandler(async (req, res) => {
+      const sub = await repo.getSubtask(req.params.id);
+      if (!sub) {
+        throw new HttpError(404, 'not_found', 'Actividad no encontrada');
+      }
+      const ev = await repo.getEvent(sub.event_id);
+      if (!ev || ev.user_id !== req.userId) {
+        throw new HttpError(404, 'not_found', 'Actividad no encontrada');
+      }
+      return res.status(200).json({
+        ok: true,
+        status: 'success',
+        data: {
+          ...mapSubtask(sub),
+          eventoNombre: ev?.nombre || 'Evento',
+        },
       });
     }),
 
@@ -210,10 +253,11 @@ export function createSubtasksController(repo) {
         if (rawDate && !norm) throw badRequest('Fecha límite no válida.');
         nuevaFecha = norm || '';
         patch.fecha_limite = nuevaFecha;
-        // Transición automática a POSTERGADA si se cambia la fecha
-        if (norm && norm !== sub.fecha_limite && sub.estado !== ESTADOS.HECHA) {
-          nuevoEstado = ESTADOS.POSPUESTA;
-          patch.estado = ESTADOS.POSPUESTA;
+        // Conservar el estado actual al reprogramar (no confundir reprogramada con pospuesta).
+        // Si estaba Hecha y se reprograma sin indicar estado, vuelve a Pendiente.
+        if (norm && norm !== sub.fecha_limite && sub.estado === ESTADOS.HECHA && estado === undefined && status === undefined) {
+          nuevoEstado = ESTADOS.PENDIENTE;
+          patch.estado = ESTADOS.PENDIENTE;
         }
       }
 
@@ -233,7 +277,14 @@ export function createSubtasksController(repo) {
       if (responsable !== undefined) patch.responsable = String(responsable).trim();
 
       // Detección de sobrecarga en el backend si la tarea resultante no está Hecha
-      if (nuevoEstado !== ESTADOS.HECHA && nuevaFecha) {
+      const fechaOriginalNorm = normalizarFecha(sub.fecha_limite) || '';
+      const horasOriginales = Number(sub.horas_estimadas) || 0;
+      const esReduccionMismaFecha =
+        nuevaFecha === fechaOriginalNorm &&
+        nuevasHoras < horasOriginales &&
+        sub.estado !== ESTADOS.HECHA;
+
+      if (nuevoEstado !== ESTADOS.HECHA && nuevaFecha && !esReduccionMismaFecha) {
         const limite = await getUserLimit(repo, req.userId);
         const { subtasks: userSubs } = await loadUserSubtasks(repo, req.userId);
 
@@ -272,12 +323,39 @@ export function createSubtasksController(repo) {
       }
 
       const updated = await repo.updateSubtask(sub.id, patch);
+      const limiteActual = await getUserLimit(repo, req.userId);
+      const { subtasks: userSubsAfter } = await loadUserSubtasks(repo, req.userId);
+      const fechaCalculo = normalizarFecha(updated.fecha_limite) || hoyIso();
+      const plannedHours = userSubsAfter
+        .filter((s) => s.estado !== ESTADOS.HECHA && normalizarFecha(s.fechaLimite) === fechaCalculo)
+        .reduce((acc, s) => acc + (Number(s.horasEstimadas) || 0), 0);
+
+      const mapped = mapSubtask(updated);
+      const statusSlug =
+        mapped.estado === ESTADOS.HECHA
+          ? 'done'
+          : mapped.estado === ESTADOS.POSPUESTA
+            ? 'postponed'
+            : 'pending';
+
       return res.status(200).json({
         ok: true,
         status: 'success',
-        message: 'Cambios guardados',
+        resolved: true,
+        message: mapped.estado === ESTADOS.HECHA ? 'Conflicto resuelto' : 'Cambios guardados',
+        planned_hours: Math.round(plannedHours * 10) / 10,
+        limit_hours: limiteActual,
         data: {
-          ...mapSubtask(updated),
+          ...mapped,
+          id: updated.id,
+          activity: ev.id,
+          title: updated.titulo,
+          description: ev.descripcion || '',
+          status: statusSlug,
+          target_date: mapped.fechaLimite,
+          estimated_hours: mapped.horasEstimadas,
+          note: updated.nota ?? '',
+          done_at: mapped.estado === ESTADOS.HECHA ? new Date().toISOString() : null,
           eventoId: ev.id,
           eventoNombre: ev.nombre,
         },

@@ -431,6 +431,37 @@ export const swaggerDocument = {
         responses: { 200: { description: 'Subtarea eliminada' } },
       },
     },
+    '/api/activities': {
+      get: {
+        tags: ['Subtareas y Gestiones Logísticas'],
+        summary: 'Listar todas las actividades/subtareas del usuario autenticado',
+        security: [{ BearerAuth: [] }],
+        responses: {
+          200: { description: 'Listado de actividades del usuario' },
+          401: { description: 'No autenticado (Authentication credentials were not provided.)' },
+        },
+      },
+    },
+    '/api/activities/{id}': {
+      get: {
+        tags: ['Subtareas y Gestiones Logísticas'],
+        summary: 'Consultar una actividad específica por ID',
+        security: [{ BearerAuth: [] }],
+        parameters: [
+          {
+            name: 'id',
+            in: 'path',
+            required: true,
+            schema: { type: 'string', example: 'sub-4869c1d3-ccb9-40d4-89b1-ab85e2339df5' },
+          },
+        ],
+        responses: {
+          200: { description: 'Detalle de la actividad' },
+          401: { description: 'No autenticado (Authentication credentials were not provided.)' },
+          404: { description: 'Actividad no encontrada o pertenece a otro usuario' },
+        },
+      },
+    },
   },
 };
 

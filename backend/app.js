@@ -81,12 +81,16 @@ export function createApp(customRepo = null, customSecret = DEFAULT_AUTH_SECRET)
   // Cambio de estado con nota opcional (US-16 a US-18, C1 / C5)
   app.patch(['/api/subtareas/:id/estado', '/api/subtareas/:id/estado/', '/api/subtasks/:id/estado', '/api/subtasks/:id/status'], authGuard, subtasksCtrl.changeStatus);
 
-  // Reprogramación y actualización de subtareas con detección de sobrecarga (Criterio Sobrecarga)
-  app.all(['/api/subtasks/:id', '/api/subtasks/:id/'], (req, res, next) => {
-    if (['PATCH', 'PUT'].includes(req.method)) return authGuard(req, res, () => subtasksCtrl.updateSubtask(req, res, next));
-    if (req.method === 'DELETE') return authGuard(req, res, () => subtasksCtrl.deleteSubtask(req, res, next));
-    next();
-  });
+  // Reprogramación, consulta y actualización de subtareas/actividades con detección de sobrecarga (Criterio Sobrecarga)
+  app.all(
+    ['/api/subtasks/:id', '/api/subtasks/:id/', '/api/activities/:id', '/api/activities/:id/', '/api/actividades/:id', '/api/actividades/:id/'],
+    (req, res, next) => {
+      if (req.method === 'GET') return authGuard(req, res, () => subtasksCtrl.getActivity(req, res, next));
+      if (['PATCH', 'PUT'].includes(req.method)) return authGuard(req, res, () => subtasksCtrl.updateSubtask(req, res, next));
+      if (req.method === 'DELETE') return authGuard(req, res, () => subtasksCtrl.deleteSubtask(req, res, next));
+      next();
+    }
+  );
 
   // Creación de subtareas para un evento (US-07 / C1)
   app.post(['/api/events/:id/tasks', '/api/eventos/:id/subtareas'], authGuard, subtasksCtrl.createSubtask);
